@@ -50,7 +50,8 @@ function rotateWorld(bone, yaw, pitch){
 new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
  dog=gltf.scene; scene.add(dog); mixer=new THREE.AnimationMixer(dog);
  const get=prefix=>{const clip=gltf.animations.find(a=>a.name.startsWith(prefix));if(!clip)throw Error(`Missing animation: ${prefix}`);return mixer.clipAction(clip);};
- actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle ')};
+ const turnClip=gltf.animations.find(a=>a.name==='idle_turn_180_rgt');
+ actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),turn:mixer.clipAction(turnClip),turnNext:mixer.clipAction(turnClip.clone())};
  head=dog.getObjectByName('Head_85');neck=dog.getObjectByName('Neck01_88');
  eyes=['LeftEye_58','RightEye_82'].map(n=>dog.getObjectByName(n));
  tails=Array.from({length:7},(_,i)=>dog.getObjectByName(`Tail0${i+1}_${12-i}`));
@@ -61,7 +62,7 @@ new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
  window.dogScene={dog,head,tails,actions,renderer};
 },undefined,error=>{console.error('Model loading failed',error);host.setAttribute('aria-label','Не удалось загрузить модель собаки');});
 function pose(action,time){
- mixer.stopAllAction();action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;action.play();action.time=Math.min(time,action.getClip().duration);mixer.update(0);
+ mixer.stopAllAction();action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;action.setEffectiveWeight(1);action.play();action.time=Math.min(time,action.getClip().duration);mixer.update(0);
 }
 const clock=new THREE.Clock();
 renderer.setAnimationLoop(()=>{
@@ -75,10 +76,26 @@ renderer.setAnimationLoop(()=>{
   const progress=smoothProgress;
   const standProgress=THREE.MathUtils.smoothstep(progress,.05,.55);
   const turnProgress=THREE.MathUtils.smoothstep(progress,.55,1);
-  // Keep the final standing pose during the orbit. Switching to the imported
-  // turn clip caused a pose discontinuity and added its own turn on top of ours.
   if(progress<=.05)pose(actions.lay,0);
-  else pose(actions.stand,standProgress*actions.stand.getClip().duration);
+  else if(progress<=.55)pose(actions.stand,standProgress*actions.stand.getClip().duration);
+  else {
+   // The source turn is in-place: it animates the stepping, but leaves global
+   // heading to the application. Play it twice and blend across the join.
+   const phase=turnProgress*2;
+   const enter=THREE.MathUtils.smoothstep(phase,0,.12);
+   const join=THREE.MathUtils.smoothstep(phase,.9,1);
+   mixer.stopAllAction();
+   const sample=(action,fraction,weight)=>{
+    if(weight<=0)return;
+    action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;
+    action.setEffectiveWeight(weight);action.play();
+    action.time=THREE.MathUtils.clamp(fraction,0,1)*action.getClip().duration;
+   };
+   sample(actions.stand,1,1-enter);
+   sample(actions.turn,Math.min(phase,1),enter*(1-join));
+   sample(actions.turnNext,Math.max(phase-1,0),enter*join);
+   mixer.update(0);
+  }
   dog.rotation.y=frontYaw-Math.PI*2*turnProgress;
   camera.lookAt(0,THREE.MathUtils.lerp(.2,.4,standProgress),0);
   dog.position.set(0,0,0);dog.updateMatrixWorld(true);

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from './assets/vendor/GLTFLoader.js';
 
-// The first viewport is the lying pose; one viewport of scroll scrubs stand + turn.
+// Three scroll chapters, roughly ten 120px wheel steps per chapter.
 const host = document.querySelector('#scene');
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -34,7 +34,7 @@ function resize(){
  camera.position.set(0,.75,camera.aspect<.7?2.25:1.85);camera.lookAt(0,.38,0);camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(host); resize();
-let dog, mixer, head, neck, eyes=[], tails=[], actions, elapsed=0, frontYaw=0, smoothProgress=0;
+let dog, mixer, head, neck, tails=[], actions, elapsed=0, frontYaw=0, smoothProgress=0;
 const bounds=new THREE.Box3(), center=new THREE.Vector3();
 const parentRotation=new THREE.Quaternion(), worldDelta=new THREE.Quaternion(), localDelta=new THREE.Quaternion();
 const axisUp=new THREE.Vector3(0,1,0), axisRight=new THREE.Vector3(1,0,0);
@@ -50,10 +50,8 @@ function rotateWorld(bone, yaw, pitch){
 new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
  dog=gltf.scene; scene.add(dog); mixer=new THREE.AnimationMixer(dog);
  const get=prefix=>{const clip=gltf.animations.find(a=>a.name.startsWith(prefix));if(!clip)throw Error(`Missing animation: ${prefix}`);return mixer.clipAction(clip);};
- const turnClip=gltf.animations.find(a=>a.name==='idle_turn_180_rgt');
- actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),turn:mixer.clipAction(turnClip),turnNext:mixer.clipAction(turnClip.clone())};
+ actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),sit:get('idle_to_idle_sit ')};
  head=dog.getObjectByName('Head_85');neck=dog.getObjectByName('Neck01_88');
- eyes=['LeftEye_58','RightEye_82'].map(n=>dog.getObjectByName(n));
  tails=Array.from({length:7},(_,i)=>dog.getObjectByName(`Tail0${i+1}_${12-i}`));
  pose(actions.lay,0);
  const h=head.getWorldPosition(new THREE.Vector3()), hip=dog.getObjectByName('Hips_115').getWorldPosition(new THREE.Vector3());
@@ -68,35 +66,31 @@ const clock=new THREE.Clock();
 renderer.setAnimationLoop(()=>{
  const dt=Math.min(clock.getDelta(),.05);elapsed+=dt;
  if(dog&&actions){
-  const target=THREE.MathUtils.clamp(scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight),0,1);
-  // Follow scroll without wheel-step jumps, with a speed limit for large jumps.
-  // A single unwrapped angle preserves a full revolution in either direction.
-  const delta=(target-smoothProgress)*(1-Math.exp(-dt*4));
-  smoothProgress+=THREE.MathUtils.clamp(delta,-dt*.28,dt*.28);
+  const target=THREE.MathUtils.clamp(scrollY/1200,0,3);
+  // Damping removes wheel notches; cap speed so a scrollbar jump cannot skip
+  // the standing or sitting transition. Native scrolling remains untouched.
+  const delta=(target-smoothProgress)*(1-Math.exp(-dt*3.5));
+  smoothProgress+=THREE.MathUtils.clamp(delta,-dt*.65,dt*.65);
   const progress=smoothProgress;
-  const standProgress=THREE.MathUtils.smoothstep(progress,.05,.55);
-  const turnProgress=THREE.MathUtils.smoothstep(progress,.55,1);
-  if(progress<=.05)pose(actions.lay,0);
-  else if(progress<=.55)pose(actions.stand,standProgress*actions.stand.getClip().duration);
+  const standProgress=THREE.MathUtils.smoothstep(progress,.35,1);
+  const sitProgress=THREE.MathUtils.smoothstep(progress,1.35,2);
+  if(progress<=.35)pose(actions.lay,0);
+  else if(progress<=1.35)pose(actions.stand,standProgress*actions.stand.getClip().duration);
   else {
-   // The source turn is in-place: it animates the stepping, but leaves global
-   // heading to the application. Play it twice and blend across the join.
-   const phase=turnProgress*2;
-   const enter=THREE.MathUtils.smoothstep(phase,0,.12);
-   const join=THREE.MathUtils.smoothstep(phase,.9,1);
+   // Blend the final standing pose into the sitting clip to avoid a pose snap.
+   const blend=THREE.MathUtils.smoothstep(sitProgress,0,.15);
    mixer.stopAllAction();
-   const sample=(action,fraction,weight)=>{
-    if(weight<=0)return;
+   for(const [action,fraction,weight] of [
+    [actions.stand,1,1-blend], [actions.sit,sitProgress,blend]
+   ]){
+    if(weight<=0)continue;
     action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;
     action.setEffectiveWeight(weight);action.play();
-    action.time=THREE.MathUtils.clamp(fraction,0,1)*action.getClip().duration;
-   };
-   sample(actions.stand,1,1-enter);
-   sample(actions.turn,Math.min(phase,1),enter*(1-join));
-   sample(actions.turnNext,Math.max(phase-1,0),enter*join);
+    action.time=fraction*action.getClip().duration;
+   }
    mixer.update(0);
   }
-  dog.rotation.y=frontYaw-Math.PI*2*turnProgress;
+  dog.rotation.y=frontYaw;
   camera.lookAt(0,THREE.MathUtils.lerp(.2,.4,standProgress),0);
   dog.position.set(0,0,0);dog.updateMatrixWorld(true);
   bounds.setFromObject(dog,true);bounds.getCenter(center);
@@ -111,6 +105,7 @@ renderer.setAnimationLoop(()=>{
    tails.forEach((bone,i)=>rotateWorld(bone,Math.sin(elapsed*4.2-i*.5)*.07*weight,0));
   }
   window.dogScene.progress=progress;
+  window.dogScene.stage=progress<1?'lying-to-standing':progress<2?'standing-to-sitting':'sitting';
  }
  renderer.render(scene,camera);
 });

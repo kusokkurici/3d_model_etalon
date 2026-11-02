@@ -34,7 +34,7 @@ function resize(){
  camera.position.set(0,.75,camera.aspect<.7?2.25:1.85);camera.lookAt(0,.38,0);camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(host); resize();
-let dog, mixer, head, neck, eyes=[], tails=[], actions, elapsed=0, frontYaw=0;
+let dog, mixer, head, neck, eyes=[], tails=[], actions, elapsed=0, frontYaw=0, smoothProgress=0;
 const bounds=new THREE.Box3(), center=new THREE.Vector3();
 const parentRotation=new THREE.Quaternion(), worldDelta=new THREE.Quaternion(), localDelta=new THREE.Quaternion();
 const axisUp=new THREE.Vector3(0,1,0), axisRight=new THREE.Vector3(1,0,0);
@@ -50,7 +50,7 @@ function rotateWorld(bone, yaw, pitch){
 new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
  dog=gltf.scene; scene.add(dog); mixer=new THREE.AnimationMixer(dog);
  const get=prefix=>{const clip=gltf.animations.find(a=>a.name.startsWith(prefix));if(!clip)throw Error(`Missing animation: ${prefix}`);return mixer.clipAction(clip);};
- actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),turn:get('idle_turn_180_rgt')};
+ actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle ')};
  head=dog.getObjectByName('Head_85');neck=dog.getObjectByName('Neck01_88');
  eyes=['LeftEye_58','RightEye_82'].map(n=>dog.getObjectByName(n));
  tails=Array.from({length:7},(_,i)=>dog.getObjectByName(`Tail0${i+1}_${12-i}`));
@@ -67,13 +67,20 @@ const clock=new THREE.Clock();
 renderer.setAnimationLoop(()=>{
  const dt=Math.min(clock.getDelta(),.05);elapsed+=dt;
  if(dog&&actions){
-  const progress=THREE.MathUtils.clamp(scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight),0,1);
+  const target=THREE.MathUtils.clamp(scrollY/Math.max(1,document.documentElement.scrollHeight-innerHeight),0,1);
+  // Follow scroll without wheel-step jumps, with a speed limit for large jumps.
+  // A single unwrapped angle preserves a full revolution in either direction.
+  const delta=(target-smoothProgress)*(1-Math.exp(-dt*4));
+  smoothProgress+=THREE.MathUtils.clamp(delta,-dt*.28,dt*.28);
+  const progress=smoothProgress;
+  const standProgress=THREE.MathUtils.smoothstep(progress,.05,.55);
+  const turnProgress=THREE.MathUtils.smoothstep(progress,.55,1);
+  // Keep the final standing pose during the orbit. Switching to the imported
+  // turn clip caused a pose discontinuity and added its own turn on top of ours.
   if(progress<=.05)pose(actions.lay,0);
-  else if(progress<.55)pose(actions.stand,(progress-.05)/.5*actions.stand.getClip().duration);
-  else pose(actions.turn,(progress-.55)/.45*actions.turn.getClip().duration);
-  const turnProgress=THREE.MathUtils.clamp((progress-.55)/.45,0,1);
-  dog.rotation.y=frontYaw-Math.PI*turnProgress;
-  camera.lookAt(0,THREE.MathUtils.lerp(.2,.4,THREE.MathUtils.clamp(progress/.55,0,1)),0);
+  else pose(actions.stand,standProgress*actions.stand.getClip().duration);
+  dog.rotation.y=frontYaw-Math.PI*2*turnProgress;
+  camera.lookAt(0,THREE.MathUtils.lerp(.2,.4,standProgress),0);
   dog.position.set(0,0,0);dog.updateMatrixWorld(true);
   bounds.setFromObject(dog,true);bounds.getCenter(center);
   dog.position.set(-center.x,-bounds.min.y,-center.z);dog.updateMatrixWorld(true);

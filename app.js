@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from './assets/vendor/GLTFLoader.js';
 
-// Three scroll chapters, roughly ten 120px wheel steps per chapter.
+// Four scroll chapters, roughly ten 120px wheel steps per chapter.
 const host = document.querySelector('#scene');
 const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -34,7 +34,8 @@ function resize(){
  camera.position.set(0,.75,camera.aspect<.7?2.25:1.85);camera.lookAt(0,.38,0);camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(host); resize();
-let dog, mixer, head, neck, tails=[], actions, elapsed=0, frontYaw=0, smoothProgress=0;
+let dog, mixer, head, neck, gazeNecks=[], tails=[], actions, elapsed=0, frontYaw=0, smoothProgress=0;
+const boneRest=[];
 const bounds=new THREE.Box3(), center=new THREE.Vector3();
 const parentRotation=new THREE.Quaternion(), worldDelta=new THREE.Quaternion(), localDelta=new THREE.Quaternion();
 const axisUp=new THREE.Vector3(0,1,0), axisRight=new THREE.Vector3(1,0,0);
@@ -50,8 +51,11 @@ function rotateWorld(bone, yaw, pitch){
 new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
  dog=gltf.scene; scene.add(dog); mixer=new THREE.AnimationMixer(dog);
  const get=prefix=>{const clip=gltf.animations.find(a=>a.name.startsWith(prefix));if(!clip)throw Error(`Missing animation: ${prefix}`);return mixer.clipAction(clip);};
- actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),sit:get('idle_to_idle_sit ')};
+ actions={lay:get('idle_lay_pose'),stand:get('idle_lay_to_idle '),sit:get('idle_to_idle_sit '),rise:get('idle_sit_to_idle '),turn:get('idle_turn_90_rgt'),lieDown:get('idle_to_idle_lay ')};
  head=dog.getObjectByName('Head_85');neck=dog.getObjectByName('Neck01_88');
+ gazeNecks=['Neck01_88','Neck02_87','Neck03_86'].map(name=>dog.getObjectByName(name));
+ // Remove previous frame's additive head/tail offsets before sampling clips.
+ dog.traverse(bone=>{if(bone.isBone)boneRest.push([bone,bone.quaternion.clone()]);});
  tails=Array.from({length:7},(_,i)=>dog.getObjectByName(`Tail0${i+1}_${12-i}`));
  pose(actions.lay,0);
  const h=head.getWorldPosition(new THREE.Vector3()), hip=dog.getObjectByName('Hips_115').getWorldPosition(new THREE.Vector3());
@@ -62,11 +66,22 @@ new GLTFLoader().load('./animated_pitbull_dog.glb', gltf => {
 function pose(action,time){
  mixer.stopAllAction();action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;action.setEffectiveWeight(1);action.play();action.time=Math.min(time,action.getClip().duration);mixer.update(0);
 }
+// Absolute sampling keeps blended boundaries identical in either scroll direction.
+function blendPose(from,fromTime,to,toTime,weight){
+ mixer.stopAllAction();
+ for(const [action,time,w] of [[from,fromTime,1-weight],[to,toTime,weight]]){
+  if(w<=0)continue;
+  action.reset();action.setLoop(THREE.LoopOnce,1);action.clampWhenFinished=true;
+  action.setEffectiveWeight(w);action.play();action.time=time*action.getClip().duration;
+ }
+ mixer.update(0);
+}
 const clock=new THREE.Clock();
 renderer.setAnimationLoop(()=>{
  const dt=Math.min(clock.getDelta(),.05);elapsed+=dt;
  if(dog&&actions){
-  const target=THREE.MathUtils.clamp(scrollY/1200,0,3);
+  for(const [bone,rotation] of boneRest)bone.quaternion.copy(rotation);
+  const target=THREE.MathUtils.clamp(scrollY/1200,0,4);
   // Damping removes wheel notches; cap speed so a scrollbar jump cannot skip
   // the standing or sitting transition. Native scrolling remains untouched.
   const delta=(target-smoothProgress)*(1-Math.exp(-dt*3.5));
@@ -76,7 +91,7 @@ renderer.setAnimationLoop(()=>{
   const sitProgress=THREE.MathUtils.smoothstep(progress,1.35,2);
   if(progress<=.35)pose(actions.lay,0);
   else if(progress<=1.35)pose(actions.stand,standProgress*actions.stand.getClip().duration);
-  else {
+  else if(progress<=2.35) {
    // Blend the final standing pose into the sitting clip to avoid a pose snap.
    const blend=THREE.MathUtils.smoothstep(sitProgress,0,.15);
    mixer.stopAllAction();
@@ -90,22 +105,48 @@ renderer.setAnimationLoop(()=>{
    }
    mixer.update(0);
   }
-  dog.rotation.y=frontYaw;
-  camera.lookAt(0,THREE.MathUtils.lerp(.2,.4,standProgress),0);
+  if(progress>2.35){
+   // The source turn is in-place: its paw steps accompany the scene heading below.
+   // Stand before turning, then use the authored lowering clip with all four paws.
+   if(progress<2.7){
+    const t=THREE.MathUtils.smoothstep(progress,2.35,2.7);
+    blendPose(actions.sit,1,actions.rise,t,THREE.MathUtils.smoothstep(t,0,.12));
+   }else if(progress<3.25){
+    const t=THREE.MathUtils.clamp((progress-2.7)/.55,0,1);
+    blendPose(actions.rise,1,actions.turn,t,THREE.MathUtils.smoothstep(t,0,.1));
+   }else if(progress<3.85){
+    const t=THREE.MathUtils.smoothstep(progress,3.25,3.85);
+    blendPose(actions.turn,1,actions.lieDown,t,THREE.MathUtils.smoothstep(t,0,.12));
+   }else{
+    // End in exactly the same authored resting pose as chapter one.
+    blendPose(actions.lieDown,1,actions.lay,0,THREE.MathUtils.smoothstep(progress,3.85,4));
+   }
+  }
+  const turnProgress=THREE.MathUtils.smoothstep(progress,2.75,3.2);
+  dog.rotation.y=frontYaw+Math.PI/2*turnProgress;
+  camera.lookAt(0,THREE.MathUtils.lerp(THREE.MathUtils.lerp(.2,.4,standProgress),.2,THREE.MathUtils.smoothstep(progress,2.35,3)),0);
   dog.position.set(0,0,0);dog.updateMatrixWorld(true);
   bounds.setFromObject(dog,true);bounds.getCenter(center);
   dog.position.set(-center.x,-bounds.min.y,-center.z);dog.updateMatrixWorld(true);
+  // Counter the body's quarter-turn across the entire neck chain. Keep this
+  // camera-facing resting direction even when reduced motion disables tracking.
+  if(reduced.matches)follow.set(0,0);
+  else follow.lerp(pointer,1-Math.exp(-dt*7));
+  const cameraYaw=-Math.PI/2*turnProgress;
+  const trackingRange=THREE.MathUtils.lerp(1,.48,turnProgress);
+  const gazeYaw=cameraYaw+follow.x*.66*trackingRange;
+  const gazePitch=-follow.y*.36;
+  const neckShares=[.28,.22,.18];
+  gazeNecks.forEach((bone,i)=>rotateWorld(bone,gazeYaw*neckShares[i],gazePitch*neckShares[i]));
+  rotateWorld(head,gazeYaw*.32,gazePitch*.32);
   if(!reduced.matches){
-   follow.lerp(pointer,1-Math.exp(-dt*7));
    const weight=1-THREE.MathUtils.smoothstep(progress,.03,.25);
-   rotateWorld(neck,follow.x*.18*weight,-follow.y*.12*weight);
-   rotateWorld(head,follow.x*.48*weight,-follow.y*.24*weight);
    // Keep the imported eye pose: rotating these eye bones independently
    // exposes the back of the eyeballs at the limits of the cursor range.
    tails.forEach((bone,i)=>rotateWorld(bone,Math.sin(elapsed*4.2-i*.5)*.07*weight,0));
   }
   window.dogScene.progress=progress;
-  window.dogScene.stage=progress<1?'lying-to-standing':progress<2?'standing-to-sitting':'sitting';
+  window.dogScene.stage=progress<1?'lying-to-standing':progress<2?'standing-to-sitting':progress<2.35?'sitting':progress<2.7?'rising-to-turn':progress<3.25?'turning-90':progress<3.85?'lowering':'lying-90';
  }
  renderer.render(scene,camera);
 });
